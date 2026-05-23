@@ -6,7 +6,7 @@ import threading
 import tkinter as tk
 from tkinter import messagebox, ttk
 
-from .config import ICON_PATH, AppConfig, load_config, save_config
+from .config import ICON_PATH, ICON_PNG_PATH, AppConfig, load_config, save_config
 from .market_data import QuoteError, StockQuote, fetch_quotes, normalize_symbol
 from .tray import TrayController, TrayUnavailable
 
@@ -47,16 +47,15 @@ class AStockPanel(tk.Tk):
         self.after(150, self._drain_queue)
 
     def _apply_app_icon(self) -> None:
-        if sys.platform == "win32":
-            try:
-                import ctypes
-
-                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("LEO0727.AStockPanel")
-            except Exception:
-                pass
         if ICON_PATH.exists():
             try:
-                self.iconbitmap(str(ICON_PATH))
+                self.iconbitmap(default=str(ICON_PATH))
+            except tk.TclError:
+                pass
+        if ICON_PNG_PATH.exists():
+            try:
+                self._icon_photo = tk.PhotoImage(file=str(ICON_PNG_PATH))
+                self.iconphoto(True, self._icon_photo)
             except tk.TclError:
                 pass
 
@@ -382,7 +381,12 @@ class AStockPanel(tk.Tk):
         dialog.title("设置")
         if ICON_PATH.exists():
             try:
-                dialog.iconbitmap(str(ICON_PATH))
+                dialog.iconbitmap(default=str(ICON_PATH))
+            except tk.TclError:
+                pass
+        if hasattr(self, "_icon_photo"):
+            try:
+                dialog.iconphoto(False, self._icon_photo)
             except tk.TclError:
                 pass
         dialog.geometry("390x260")
@@ -606,5 +610,17 @@ def format_money(value: float | None) -> str:
 
 
 def main() -> None:
+    configure_windows_app_id()
     app = AStockPanel()
     app.mainloop()
+
+
+def configure_windows_app_id() -> None:
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("LEO0727.AStockPanel")
+    except Exception:
+        pass

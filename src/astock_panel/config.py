@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import json
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if getattr(sys, "frozen", False):
+    PROJECT_ROOT = Path(sys.executable).resolve().parent
+else:
+    PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_PATH = PROJECT_ROOT / "config" / "watchlist.json"
 ICON_PATH = PROJECT_ROOT / "assets" / "app_icon.ico"
 ICON_PNG_PATH = PROJECT_ROOT / "assets" / "app_icon.png"

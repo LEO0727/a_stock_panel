@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Callable
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if getattr(sys, "frozen", False):
+    PROJECT_ROOT = Path(sys.executable).resolve().parent
+else:
+    PROJECT_ROOT = Path(__file__).resolve().parents[2]
 ICON_PNG_PATH = PROJECT_ROOT / "assets" / "app_icon.png"
 
 

@@ -10,6 +10,14 @@
 - `start.bat`：桌面窗口模式，启动后命令行会立即返回
 - `start_terminal.bat`：终端模式
 
+如果希望任务栏图标也稳定显示为应用图标，先运行一次：
+
+```powershell
+.\build_exe.bat
+```
+
+构建完成后，`start.bat` 和 `启动软件.vbs` 会优先启动 `dist\AStockPanel\AStockPanel.exe`。
+
 也可以在项目目录运行：
 
 ```powershell
