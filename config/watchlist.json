@@ -2,12 +2,12 @@
   "refresh_seconds": 30,
   "topmost": false,
   "compact": false,
-  "mode": "mini",
+  "mode": "summary",
   "color_mode": "neutral",
   "opacity": 1.0,
   "minimize_to_taskbar": false,
   "enable_tray": true,
-  "geometry": "900x520",
+  "geometry": "1120x720",
   "symbols": [
     "1.000001",
     "0.399001"

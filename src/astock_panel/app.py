@@ -111,7 +111,7 @@ class AStockPanel(tk.Tk):
 
     def _set_mode_geometry(self, mode: str) -> None:
         if mode == "table":
-            self.geometry(self.config_data.geometry if self.config_data.geometry and "x" in self.config_data.geometry else "900x520")
+            self.geometry(self.config_data.geometry if self.config_data.geometry and "x" in self.config_data.geometry else "1120x720")
         elif mode == "mini":
             self.geometry("360x110")
         elif mode == "widget":
@@ -135,6 +135,7 @@ class AStockPanel(tk.Tk):
     def _clear_window(self) -> None:
         for child in self.winfo_children():
             child.destroy()
+        self.tree = None
 
     def _apply_window_options(self) -> None:
         borderless = self.config_data.mode in {"mini", "summary"}
@@ -154,25 +155,17 @@ class AStockPanel(tk.Tk):
         self.attributes("-alpha", max(0.45, min(1.0, float(self.opacity_var.get()))))
 
     def _render_table_mode(self) -> None:
-        root = ttk.Frame(self, style="Panel.TFrame", padding=12)
+        root = tk.Frame(self, bg="#f6f7f9")
         root.pack(fill=tk.BOTH, expand=True)
 
-        header = ttk.Frame(root, style="Header.TFrame", padding=(10, 8))
-        header.pack(fill=tk.X)
-        ttk.Label(header, text="A 股行情管理", style="Header.TLabel", font=("Microsoft YaHei UI", 12, "bold")).pack(side=tk.LEFT)
-        ttk.Label(header, text="置顶项会进入托盘和极简模式", style="Header.TLabel").pack(side=tk.LEFT, padx=(14, 0))
-        ttk.Button(header, text="设置", command=self.open_settings).pack(side=tk.RIGHT)
+        self.sidebar = tk.Frame(root, bg="#f7f8fa", width=300, highlightbackground="#e3e6ea", highlightthickness=1)
+        self.sidebar.pack(side=tk.LEFT, fill=tk.Y)
+        self.sidebar.pack_propagate(False)
+        self.main_panel = tk.Frame(root, bg="#ffffff")
+        self.main_panel.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        tabs = ttk.Notebook(root)
-        tabs.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
-
-        quotes_tab = ttk.Frame(tabs, style="Panel.TFrame", padding=(0, 0, 0, 0))
-        chart_tab = ttk.Frame(tabs, style="Panel.TFrame", padding=(0, 0, 0, 0))
-        tabs.add(quotes_tab, text="自选行情")
-        tabs.add(chart_tab, text="分时 / K线")
-
-        self._render_watchlist_tab(quotes_tab)
-        self._render_chart_tab(chart_tab)
+        self._render_modern_sidebar()
+        self._render_modern_main()
 
     def _render_watchlist_tab(self, parent: tk.Widget) -> None:
         toolbar = ttk.Frame(parent, style="Panel.TFrame")
@@ -237,6 +230,161 @@ class AStockPanel(tk.Tk):
         footer.pack(fill=tk.X, pady=(8, 0))
         ttk.Label(footer, textvariable=self.status_var, style="Muted.TLabel").pack(side=tk.LEFT)
         ttk.Label(footer, text="双击行可置顶；关闭窗口会保留托盘", style="Muted.TLabel").pack(side=tk.RIGHT)
+
+    def _render_modern_sidebar(self) -> None:
+        for child in self.sidebar.winfo_children():
+            child.destroy()
+
+        search = tk.Frame(self.sidebar, bg="#f7f8fa")
+        search.pack(fill=tk.X, padx=12, pady=(12, 8))
+        entry = tk.Entry(
+            search,
+            textvariable=self.symbol_var,
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10),
+            bg="#ffffff",
+            fg="#2b3035",
+            insertbackground="#2b3035",
+        )
+        entry.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=7)
+        entry.bind("<Return>", lambda _event: self.add_symbol())
+        tk.Button(search, text="+", command=self.add_symbol, relief=tk.FLAT, bg="#ffffff", fg="#6a7178", font=("Microsoft YaHei UI", 12, "bold"), width=3).pack(side=tk.LEFT, padx=(6, 0), ipady=2)
+
+        tools = tk.Frame(self.sidebar, bg="#f7f8fa")
+        tools.pack(fill=tk.X, padx=14, pady=(2, 6))
+        tk.Label(tools, text="关注列表", bg="#f7f8fa", fg="#8a9096", font=("Microsoft YaHei UI", 10, "bold")).pack(side=tk.LEFT)
+        tk.Button(tools, text="刷新", command=self.refresh_quotes, relief=tk.FLAT, bg="#f7f8fa", fg="#7b8289").pack(side=tk.RIGHT)
+
+        list_area = tk.Canvas(self.sidebar, bg="#f7f8fa", highlightthickness=0)
+        scrollbar = ttk.Scrollbar(self.sidebar, orient=tk.VERTICAL, command=list_area.yview)
+        list_area.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        list_area.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(8, 0), pady=(0, 10))
+        holder = tk.Frame(list_area, bg="#f7f8fa")
+        window_id = list_area.create_window((0, 0), window=holder, anchor="nw")
+        holder.bind("<Configure>", lambda _event: list_area.configure(scrollregion=list_area.bbox("all")))
+        list_area.bind("<Configure>", lambda event: list_area.itemconfigure(window_id, width=event.width))
+
+        selected = self._selected_chart_secid()
+        for quote in self.last_quotes:
+            self._watch_card(holder, quote, quote.secid == selected)
+
+    def _watch_card(self, parent: tk.Widget, quote: StockQuote, selected: bool) -> None:
+        bg = "#e9eaec" if selected else "#ffffff"
+        card = tk.Frame(parent, bg=bg, highlightbackground="#edf0f2", highlightthickness=1)
+        card.pack(fill=tk.X, padx=0, pady=4)
+        card.bind("<Button-1>", lambda _event, secid=quote.secid: self.select_modern_symbol(secid))
+
+        top = tk.Frame(card, bg=bg)
+        top.pack(fill=tk.X, padx=12, pady=(9, 0))
+        tk.Label(top, text=quote.name, bg=bg, fg="#22272d", font=("Microsoft YaHei UI", 10, "bold")).pack(side=tk.LEFT)
+        pill_bg = "#ffe5e7" if (quote.change_percent or 0) >= 0 else "#def7e6"
+        tk.Label(top, text=format_percent(quote.change_percent), bg=pill_bg, fg=self._quote_color(quote), font=("Microsoft YaHei UI", 9, "bold"), padx=8, pady=2).pack(side=tk.RIGHT)
+
+        bottom = tk.Frame(card, bg=bg)
+        bottom.pack(fill=tk.X, padx=12, pady=(2, 9))
+        pin_text = "★" if quote.secid in self._pinned_set() else "☆"
+        tk.Button(bottom, text=pin_text, command=lambda secid=quote.secid: self.toggle_pin(secid), relief=tk.FLAT, bg=bg, fg="#8a9096", width=2).pack(side=tk.LEFT)
+        tk.Label(bottom, text=quote.code, bg=bg, fg="#9aa0a6", font=("Microsoft YaHei UI", 9)).pack(side=tk.LEFT, padx=(2, 0))
+        tk.Label(bottom, text=format_price(quote.price), bg=bg, fg="#858b92", font=("Microsoft YaHei UI", 10)).pack(side=tk.RIGHT)
+
+    def _render_modern_main(self) -> None:
+        for child in self.main_panel.winfo_children():
+            child.destroy()
+
+        top = tk.Frame(self.main_panel, bg="#ffffff")
+        top.pack(fill=tk.X, padx=24, pady=(14, 8))
+        self._render_index_strip(top)
+
+        controls = tk.Frame(top, bg="#ffffff")
+        controls.pack(side=tk.RIGHT)
+        ttk.Button(controls, text="置顶", command=self.toggle_selected_pin).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(controls, text="移除", command=self.remove_selected).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(controls, text="刷新", command=self.refresh_quotes).pack(side=tk.LEFT, padx=(0, 12))
+        tk.Label(controls, text="模式", bg="#ffffff", fg="#8a9096").pack(side=tk.LEFT, padx=(0, 5))
+        mode_box = ttk.Combobox(controls, textvariable=self.mode_label_var, values=list(MODE_LABELS.values()), width=9, state="readonly")
+        mode_box.pack(side=tk.LEFT, padx=(0, 8))
+        mode_box.bind("<<ComboboxSelected>>", lambda _event: self.set_mode_from_label())
+        ttk.Button(controls, text="设置", command=self.open_settings).pack(side=tk.LEFT)
+
+        tk.Frame(self.main_panel, bg="#eef1f4", height=1).pack(fill=tk.X, padx=24)
+
+        quote = self._selected_quote() or (self.last_quotes[0] if self.last_quotes else None)
+        if quote:
+            self.chart_symbol_var.set(quote.secid)
+            self._render_quote_header(quote)
+        else:
+            tk.Label(self.main_panel, text="添加自选后显示行情", bg="#ffffff", fg="#7b8289", font=("Microsoft YaHei UI", 16, "bold")).pack(expand=True)
+            return
+
+        tab_bar = tk.Frame(self.main_panel, bg="#ffffff")
+        tab_bar.pack(fill=tk.X, padx=24, pady=(10, 0))
+        for text in ("分时", "日K", "周K", "月K"):
+            active = self.chart_period_var.get() == text
+            label = tk.Label(
+                tab_bar,
+                text=text,
+                bg="#ffffff",
+                fg="#2f8cff" if active else "#30363d",
+                font=("Microsoft YaHei UI", 11, "bold" if active else "normal"),
+                padx=10,
+                pady=7,
+            )
+            label.pack(side=tk.LEFT, padx=(0, 18))
+            label.bind("<Button-1>", lambda _event, value=text: self.select_period(value))
+            if active:
+                label.bind("<Configure>", lambda event: event.widget.master.after(10, lambda widget=event.widget: self._underline_active_tab(widget)))
+
+        self.chart_canvas = tk.Canvas(self.main_panel, bg="#ffffff", highlightthickness=0)
+        self.chart_canvas.pack(fill=tk.BOTH, expand=True, padx=24, pady=(4, 10))
+        self.chart_canvas.bind("<Configure>", lambda _event: self.draw_chart())
+        self.chart_status_var = tk.StringVar(value="")
+        tk.Label(self.main_panel, textvariable=self.chart_status_var, bg="#ffffff", fg="#9aa0a6", font=("Microsoft YaHei UI", 9)).pack(anchor="w", padx=24, pady=(0, 10))
+        self.after(80, self.refresh_chart)
+
+    def _render_index_strip(self, parent: tk.Widget) -> None:
+        for quote in self.last_quotes[:5]:
+            item = tk.Frame(parent, bg="#ffffff")
+            item.pack(side=tk.LEFT, padx=(0, 32))
+            tk.Label(item, text=_short_name(quote.name), bg="#ffffff", fg="#9aa0a6", font=("Microsoft YaHei UI", 10)).pack(anchor="w")
+            tk.Label(item, text=format_price(quote.price), bg="#ffffff", fg="#252b31", font=("Microsoft YaHei UI", 15, "bold")).pack(anchor="w")
+            tk.Label(item, text=f"{format_signed(quote.change_amount)}({format_percent(quote.change_percent)})", bg="#ffffff", fg=self._quote_color(quote), font=("Microsoft YaHei UI", 9, "bold")).pack(anchor="w")
+
+    def _render_quote_header(self, quote: StockQuote) -> None:
+        header = tk.Frame(self.main_panel, bg="#ffffff")
+        header.pack(fill=tk.X, padx=24, pady=(8, 0))
+        left = tk.Frame(header, bg="#ffffff")
+        left.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        tk.Label(left, text=quote.name, bg="#ffffff", fg="#24292f", font=("Microsoft YaHei UI", 21, "bold")).pack(anchor="w")
+        tk.Label(left, text=f"{quote.code}", bg="#ffffff", fg="#8c939b", font=("Microsoft YaHei UI", 11)).pack(anchor="w")
+
+        right = tk.Frame(header, bg="#ffffff")
+        right.pack(side=tk.RIGHT)
+        tk.Label(right, text=format_price(quote.price), bg="#ffffff", fg="#252b31", font=("Microsoft YaHei UI", 18, "bold")).pack(anchor="e")
+        badge_bg = "#ffe5e7" if (quote.change_percent or 0) >= 0 else "#def7e6"
+        tk.Label(right, text=format_percent(quote.change_percent), bg=badge_bg, fg=self._quote_color(quote), font=("Microsoft YaHei UI", 10, "bold"), padx=10, pady=3).pack(anchor="e", pady=(3, 0))
+
+        stats = tk.Frame(self.main_panel, bg="#ffffff")
+        stats.pack(fill=tk.X, padx=24, pady=(14, 8))
+        stat_values = [
+            ("今开", format_price(None if quote.previous_close is None else quote.previous_close + (quote.change_amount or 0))),
+            ("昨收", format_price(quote.previous_close)),
+            ("涨跌额", format_signed(quote.change_amount)),
+            ("成交量", format_volume(quote.volume)),
+            ("成交额", format_money(quote.amount)),
+            ("时间", quote.update_time),
+        ]
+        for idx, (label, value) in enumerate(stat_values):
+            cell = tk.Frame(stats, bg="#ffffff")
+            cell.grid(row=idx // 3, column=idx % 3, sticky="w", padx=(0, 90), pady=4)
+            tk.Label(cell, text=f"{label}：", bg="#ffffff", fg="#59616a", font=("Microsoft YaHei UI", 10)).pack(side=tk.LEFT)
+            tk.Label(cell, text=value, bg="#ffffff", fg="#24292f", font=("Microsoft YaHei UI", 10, "bold")).pack(side=tk.LEFT)
+
+    def _underline_active_tab(self, widget: tk.Widget) -> None:
+        x = widget.winfo_x()
+        y = widget.winfo_y() + widget.winfo_height() - 2
+        line = tk.Frame(widget.master, bg="#2f8cff", height=2, width=widget.winfo_width())
+        line.place(x=x, y=y)
 
     def _render_chart_tab(self, parent: tk.Widget) -> None:
         layout = ttk.Frame(parent, style="Panel.TFrame")
@@ -340,6 +488,26 @@ class AStockPanel(tk.Tk):
     def set_mode_from_label(self) -> None:
         self._switch_mode(LABEL_TO_MODE.get(self.mode_label_var.get(), "mini"))
 
+    def select_modern_symbol(self, secid: str) -> None:
+        self.chart_symbol_var.set(secid)
+        self.last_chart = None
+        self._render_current_mode()
+
+    def select_period(self, label: str) -> None:
+        self.chart_period_var.set(label)
+        self.last_chart = None
+        self._render_current_mode()
+
+    def toggle_pin(self, secid: str) -> None:
+        pinned = self._pinned_set()
+        if secid in pinned:
+            self.config_data.pinned_symbols = [symbol for symbol in self.config_data.pinned_symbols if normalize_symbol(symbol) != secid]
+        else:
+            self.config_data.pinned_symbols.append(secid)
+        self._save_current_config()
+        self._render_current_mode()
+        self._refresh_tray()
+
     def add_symbol(self) -> None:
         raw_symbol = self.symbol_var.get().strip()
         try:
@@ -377,10 +545,28 @@ class AStockPanel(tk.Tk):
 
     def _selected_secid(self) -> str | None:
         tree = getattr(self, "tree", None)
-        if tree is None:
+        if tree is not None:
+            selected = tree.selection()
+            if selected:
+                return str(selected[0])
+        return self._selected_chart_secid()
+
+    def _selected_chart_secid(self) -> str | None:
+        value = self.chart_symbol_var.get().strip()
+        if not value:
             return None
-        selected = tree.selection()
-        return str(selected[0]) if selected else None
+        try:
+            return normalize_symbol(value)
+        except ValueError:
+            return None
+
+    def _selected_quote(self) -> StockQuote | None:
+        selected = self._selected_chart_secid()
+        if selected:
+            for quote in self.last_quotes:
+                if quote.secid == selected:
+                    return quote
+        return None
 
     def refresh_quotes(self) -> None:
         if self.is_loading:
