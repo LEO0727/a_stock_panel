@@ -9,7 +9,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from astock_panel.app import main
+from astock_panel.qt_app import main
 
 
 if __name__ == "__main__":
