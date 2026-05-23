@@ -6,10 +6,10 @@ from typing import Callable
 
 
 if getattr(sys, "frozen", False):
-    PROJECT_ROOT = Path(sys.executable).resolve().parent
+    RESOURCE_ROOT = Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent))
 else:
-    PROJECT_ROOT = Path(__file__).resolve().parents[2]
-ICON_PNG_PATH = PROJECT_ROOT / "assets" / "app_icon.png"
+    RESOURCE_ROOT = Path(__file__).resolve().parents[2]
+ICON_PNG_PATH = RESOURCE_ROOT / "assets" / "app_icon.png"
 
 
 class TrayUnavailable(RuntimeError):

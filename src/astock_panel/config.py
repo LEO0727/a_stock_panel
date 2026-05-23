@@ -9,11 +9,15 @@ from typing import Any
 
 if getattr(sys, "frozen", False):
     PROJECT_ROOT = Path(sys.executable).resolve().parent
+    RESOURCE_ROOT = Path(getattr(sys, "_MEIPASS", PROJECT_ROOT))
 else:
     PROJECT_ROOT = Path(__file__).resolve().parents[2]
+    RESOURCE_ROOT = PROJECT_ROOT
+
 CONFIG_PATH = PROJECT_ROOT / "config" / "watchlist.json"
-ICON_PATH = PROJECT_ROOT / "assets" / "app_icon.ico"
-ICON_PNG_PATH = PROJECT_ROOT / "assets" / "app_icon.png"
+BUNDLED_CONFIG_PATH = RESOURCE_ROOT / "config" / "watchlist.json"
+ICON_PATH = RESOURCE_ROOT / "assets" / "app_icon.ico"
+ICON_PNG_PATH = RESOURCE_ROOT / "assets" / "app_icon.png"
 
 DEFAULT_SYMBOLS = ["1.000001", "0.399001"]
 VALID_MODES = {"table", "mini", "widget", "summary"}
@@ -36,10 +40,11 @@ class AppConfig:
 
 
 def load_config() -> AppConfig:
-    if not CONFIG_PATH.exists():
+    config_path = CONFIG_PATH if CONFIG_PATH.exists() else BUNDLED_CONFIG_PATH
+    if not config_path.exists():
         return AppConfig()
 
-    with CONFIG_PATH.open("r", encoding="utf-8") as file:
+    with config_path.open("r", encoding="utf-8") as file:
         raw = json.load(file)
 
     return AppConfig(
