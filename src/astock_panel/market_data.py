@@ -10,6 +10,8 @@ from datetime import datetime
 
 
 EASTMONEY_URL = "https://push2.eastmoney.com/api/qt/ulist.np/get"
+EASTMONEY_KLINE_URL = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
+EASTMONEY_TRENDS_URL = "https://push2his.eastmoney.com/api/qt/stock/trends2/get"
 SINA_URL = "https://hq.sinajs.cn/list="
 QUOTE_FIELDS = "f12,f14,f2,f3,f4,f5,f6,f18,f20,f124"
 
@@ -30,6 +32,36 @@ class StockQuote:
     amount: float | None
     previous_close: float | None
     update_time: str
+
+
+@dataclass(frozen=True)
+class KLinePoint:
+    date: str
+    open: float
+    close: float
+    high: float
+    low: float
+    volume: float
+    amount: float
+
+
+@dataclass(frozen=True)
+class TrendPoint:
+    time: str
+    price: float
+    average: float | None
+    volume: float
+    amount: float
+
+
+@dataclass(frozen=True)
+class ChartData:
+    secid: str
+    code: str
+    name: str
+    period: str
+    previous_close: float | None
+    points: list[KLinePoint] | list[TrendPoint]
 
 
 def normalize_symbol(symbol: str) -> str:
@@ -60,6 +92,121 @@ def fetch_quotes(symbols: list[str], timeout: float = 8.0) -> list[StockQuote]:
         return _fetch_eastmoney(secids, timeout)
     except QuoteError:
         return _fetch_sina(secids, timeout)
+
+
+def fetch_chart_data(secid: str, period: str, timeout: float = 8.0) -> ChartData:
+    normalized = normalize_symbol(secid)
+    if period == "trend":
+        return _fetch_trend_data(normalized, timeout)
+    return _fetch_kline_data(normalized, period, timeout)
+
+
+def _fetch_kline_data(secid: str, period: str, timeout: float) -> ChartData:
+    klt_by_period = {"day": "101", "week": "102", "month": "103"}
+    klt = klt_by_period.get(period, "101")
+    query = urllib.parse.urlencode(
+        {
+            "secid": secid,
+            "fields1": "f1,f2,f3,f4,f5,f6",
+            "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
+            "klt": klt,
+            "fqt": "1",
+            "beg": "20200101",
+            "end": "20500101",
+            "lmt": "160",
+        }
+    )
+    payload = _read_json(f"{EASTMONEY_KLINE_URL}?{query}", timeout)
+    if payload.get("rc") != 0 or not payload.get("data"):
+        raise QuoteError("K线数据返回异常")
+
+    data = payload["data"]
+    points: list[KLinePoint] = []
+    for raw in data.get("klines", []):
+        parts = raw.split(",")
+        if len(parts) < 7:
+            continue
+        points.append(
+            KLinePoint(
+                date=parts[0],
+                open=float(parts[1]),
+                close=float(parts[2]),
+                high=float(parts[3]),
+                low=float(parts[4]),
+                volume=float(parts[5]),
+                amount=float(parts[6]),
+            )
+        )
+    points = points[-160:]
+    return ChartData(
+        secid=secid,
+        code=str(data.get("code", "")),
+        name=str(data.get("name", "")),
+        period=period,
+        previous_close=_number(data.get("preKPrice")),
+        points=points,
+    )
+
+
+def _fetch_trend_data(secid: str, timeout: float) -> ChartData:
+    query = urllib.parse.urlencode(
+        {
+            "secid": secid,
+            "fields1": "f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11",
+            "fields2": "f51,f52,f53,f54,f55,f56,f57,f58",
+            "iscr": "0",
+            "ndays": "1",
+        }
+    )
+    payload = _read_json(f"{EASTMONEY_TRENDS_URL}?{query}", timeout)
+    if payload.get("rc") != 0 or not payload.get("data"):
+        raise QuoteError("分时数据返回异常")
+
+    data = payload["data"]
+    points: list[TrendPoint] = []
+    for raw in data.get("trends", []):
+        parts = raw.split(",")
+        if len(parts) < 8:
+            continue
+        points.append(
+            TrendPoint(
+                time=parts[0].split(" ", 1)[-1],
+                price=float(parts[2]),
+                average=_number(parts[7]),
+                volume=float(parts[5]),
+                amount=float(parts[6]),
+            )
+        )
+    return ChartData(
+        secid=secid,
+        code=str(data.get("code", "")),
+        name=str(data.get("name", "")),
+        period="trend",
+        previous_close=_number(data.get("preClose")),
+        points=points,
+    )
+
+
+def _read_json(url: str, timeout: float) -> dict:
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0",
+            "Referer": "https://quote.eastmoney.com/",
+        },
+    )
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except OSError as exc:
+            if attempt < 2:
+                time.sleep(0.6)
+                continue
+            raise QuoteError(f"网络请求失败: {exc}") from exc
+        except json.JSONDecodeError as exc:
+            raise QuoteError("行情返回内容无法解析") from exc
+    raise QuoteError("网络请求失败")
 
 
 def _fetch_eastmoney(secids: list[str], timeout: float) -> list[StockQuote]:

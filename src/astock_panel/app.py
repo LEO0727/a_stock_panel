@@ -7,7 +7,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 from .config import ICON_PATH, ICON_PNG_PATH, AppConfig, load_config, save_config
-from .market_data import QuoteError, StockQuote, fetch_quotes, normalize_symbol
+from .market_data import ChartData, KLinePoint, QuoteError, StockQuote, TrendPoint, fetch_chart_data, fetch_quotes, normalize_symbol
 from .tray import TrayController, TrayUnavailable
 
 
@@ -27,7 +27,11 @@ class AStockPanel(tk.Tk):
         self.result_queue: queue.Queue[tuple[str, object]] = queue.Queue()
         self.refresh_job: str | None = None
         self.is_loading = False
+        self.is_chart_loading = False
         self.last_quotes: list[StockQuote] = []
+        self.last_chart: ChartData | None = None
+        self.chart_symbol_var = tk.StringVar()
+        self.chart_period_var = tk.StringVar(value="分时")
         self.drag_start: tuple[int, int] | None = None
         self.tray_controller: TrayController | None = None
 
@@ -68,6 +72,7 @@ class AStockPanel(tk.Tk):
         self.mode_label_var = tk.StringVar(value=MODE_LABELS.get(self.config_data.mode, "极简置顶"))
         self.opacity_var = tk.DoubleVar(value=self.config_data.opacity)
         self.minimize_to_taskbar_var = tk.BooleanVar(value=self.config_data.minimize_to_taskbar)
+        self.chart_symbol_var.set(self.config_data.symbols[0] if self.config_data.symbols else "1.000001")
 
     def _build_styles(self) -> None:
         style = ttk.Style(self)
@@ -90,7 +95,6 @@ class AStockPanel(tk.Tk):
         self.context_menu.add_command(label="市场摘要", command=lambda: self._switch_mode("summary"))
         self.context_menu.add_separator()
         self.context_menu.add_command(label="刷新", command=self.refresh_quotes)
-        self.context_menu.add_command(label="设置", command=self.open_settings)
         self.context_menu.add_separator()
         self.context_menu.add_command(label="隐藏到托盘", command=self.hide_to_tray)
         self.context_menu.add_command(label="退出", command=self.quit_app)
@@ -136,6 +140,17 @@ class AStockPanel(tk.Tk):
         borderless = self.config_data.mode in {"mini", "summary"}
         self.overrideredirect(borderless)
         self.attributes("-topmost", self.topmost_var.get())
+        if self.config_data.mode == "mini":
+            self.attributes("-topmost", True)
+            try:
+                self.attributes("-transparentcolor", "#010203")
+            except tk.TclError:
+                pass
+        else:
+            try:
+                self.attributes("-transparentcolor", "")
+            except tk.TclError:
+                pass
         self.attributes("-alpha", max(0.45, min(1.0, float(self.opacity_var.get()))))
 
     def _render_table_mode(self) -> None:
@@ -148,8 +163,20 @@ class AStockPanel(tk.Tk):
         ttk.Label(header, text="置顶项会进入托盘和极简模式", style="Header.TLabel").pack(side=tk.LEFT, padx=(14, 0))
         ttk.Button(header, text="设置", command=self.open_settings).pack(side=tk.RIGHT)
 
-        toolbar = ttk.Frame(root, style="Panel.TFrame")
-        toolbar.pack(fill=tk.X, pady=(10, 8))
+        tabs = ttk.Notebook(root)
+        tabs.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
+
+        quotes_tab = ttk.Frame(tabs, style="Panel.TFrame", padding=(0, 0, 0, 0))
+        chart_tab = ttk.Frame(tabs, style="Panel.TFrame", padding=(0, 0, 0, 0))
+        tabs.add(quotes_tab, text="自选行情")
+        tabs.add(chart_tab, text="分时 / K线")
+
+        self._render_watchlist_tab(quotes_tab)
+        self._render_chart_tab(chart_tab)
+
+    def _render_watchlist_tab(self, parent: tk.Widget) -> None:
+        toolbar = ttk.Frame(parent, style="Panel.TFrame")
+        toolbar.pack(fill=tk.X, pady=(0, 8))
         ttk.Label(toolbar, text="模式").pack(side=tk.LEFT)
         mode_box = ttk.Combobox(toolbar, textvariable=self.mode_label_var, values=list(MODE_LABELS.values()), width=10, state="readonly")
         mode_box.pack(side=tk.LEFT, padx=(6, 14))
@@ -168,7 +195,7 @@ class AStockPanel(tk.Tk):
         ttk.Checkbutton(toolbar, text="窗口置顶", variable=self.topmost_var, command=self.toggle_window_topmost).pack(side=tk.LEFT)
 
         columns = ("pin", "code", "name", "price", "change", "percent", "amount", "volume", "time")
-        self.tree = ttk.Treeview(root, columns=columns, show="headings", selectmode="browse")
+        self.tree = ttk.Treeview(parent, columns=columns, show="headings", selectmode="browse")
         self.tree.pack(fill=tk.BOTH, expand=True)
         self.tree.bind("<Double-1>", lambda _event: self.toggle_selected_pin())
         self.tree.bind("<Button-3>", self._show_context_menu)
@@ -206,27 +233,73 @@ class AStockPanel(tk.Tk):
         self.tree.tag_configure("pinned", background="#f4f6f1")
         self._fill_table(self.last_quotes)
 
-        footer = ttk.Frame(root, style="Panel.TFrame")
+        footer = ttk.Frame(parent, style="Panel.TFrame")
         footer.pack(fill=tk.X, pady=(8, 0))
         ttk.Label(footer, textvariable=self.status_var, style="Muted.TLabel").pack(side=tk.LEFT)
         ttk.Label(footer, text="双击行可置顶；关闭窗口会保留托盘", style="Muted.TLabel").pack(side=tk.RIGHT)
 
+    def _render_chart_tab(self, parent: tk.Widget) -> None:
+        layout = ttk.Frame(parent, style="Panel.TFrame")
+        layout.pack(fill=tk.BOTH, expand=True)
+
+        sidebar = ttk.Frame(layout, style="Panel.TFrame", padding=(0, 0, 10, 0))
+        sidebar.pack(side=tk.LEFT, fill=tk.Y)
+        ttk.Label(sidebar, text="选择标的", font=("Microsoft YaHei UI", 10, "bold")).pack(anchor="w", pady=(0, 8))
+        self.chart_list = tk.Listbox(sidebar, width=18, height=16, activestyle="none", exportselection=False)
+        self.chart_list.pack(fill=tk.Y, expand=True)
+        self.chart_list.bind("<<ListboxSelect>>", lambda _event: self.select_chart_symbol())
+
+        for index, symbol in enumerate(self.config_data.symbols):
+            quote = next((item for item in self.last_quotes if item.secid == normalize_symbol(symbol)), None)
+            text = f"{quote.name} {quote.code}" if quote else normalize_symbol(symbol)
+            self.chart_list.insert(tk.END, text)
+            if normalize_symbol(symbol) == normalize_symbol(self.chart_symbol_var.get()):
+                self.chart_list.selection_set(index)
+
+        main = ttk.Frame(layout, style="Panel.TFrame")
+        main.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        controls = ttk.Frame(main, style="Panel.TFrame")
+        controls.pack(fill=tk.X, pady=(0, 8))
+        ttk.Label(controls, textvariable=self.chart_symbol_var, font=("Microsoft YaHei UI", 10, "bold")).pack(side=tk.LEFT)
+        period_box = ttk.Combobox(controls, textvariable=self.chart_period_var, values=["分时", "日K", "周K", "月K"], width=8, state="readonly")
+        period_box.pack(side=tk.LEFT, padx=(14, 8))
+        period_box.bind("<<ComboboxSelected>>", lambda _event: self.refresh_chart())
+        ttk.Button(controls, text="刷新图表", command=self.refresh_chart).pack(side=tk.LEFT)
+        ttk.Label(controls, text="左侧选标的；上方切换分时/K线", style="Muted.TLabel").pack(side=tk.RIGHT)
+
+        self.chart_canvas = tk.Canvas(main, bg="#fbfcfa", highlightthickness=1, highlightbackground="#d5ddd5")
+        self.chart_canvas.pack(fill=tk.BOTH, expand=True)
+        self.chart_canvas.bind("<Configure>", lambda _event: self.draw_chart())
+        self.chart_status_var = tk.StringVar(value="选择标的后显示图表")
+        ttk.Label(main, textvariable=self.chart_status_var, style="Muted.TLabel").pack(anchor="w", pady=(6, 0))
+        if self.chart_symbol_var.get():
+            self.after(100, self.refresh_chart)
+
     def _render_mini_mode(self) -> None:
-        root = tk.Frame(self, bg="#edf0ec", highlightbackground="#cfd7cf", highlightthickness=1)
+        root = tk.Frame(self, bg="#010203", highlightthickness=0)
         root.pack(fill=tk.BOTH, expand=True)
         self._bind_drag(root)
+        root.bind("<Double-Button-1>", lambda _event: self.hide_to_tray())
         quotes = self._pinned_quotes()
         if not quotes:
-            self._label(root, "在完整版置顶行情", 11, "#404841", bg="#edf0ec").pack(expand=True)
+            label = self._label(root, "在完整版置顶行情", 11, "#404841", bg="#010203")
+            label.bind("<Double-Button-1>", lambda _event: self.hide_to_tray())
+            label.pack(expand=True)
             return
 
         for quote in quotes[:3]:
-            row = tk.Frame(root, bg="#edf0ec")
+            row = tk.Frame(root, bg="#010203")
             row.pack(fill=tk.X, padx=10, pady=(8 if quote is quotes[0] else 2, 0))
             self._bind_drag(row)
-            self._label(row, _short_name(quote.name), 10, "#29312b", bg="#edf0ec", bold=True, width=8, anchor="w").pack(side=tk.LEFT)
-            self._label(row, format_price(quote.price), 13, "#29312b", bg="#edf0ec", width=10, anchor="e").pack(side=tk.LEFT, fill=tk.X, expand=True)
-            self._label(row, format_percent(quote.change_percent), 10, self._quote_color(quote), bg="#edf0ec", width=9, anchor="e").pack(side=tk.RIGHT)
+            row.bind("<Double-Button-1>", lambda _event: self.hide_to_tray())
+            name_label = self._label(row, _short_name(quote.name), 10, "#29312b", bg="#010203", bold=True, width=8, anchor="w")
+            price_label = self._label(row, format_price(quote.price), 13, "#29312b", bg="#010203", width=10, anchor="e")
+            percent_label = self._label(row, format_percent(quote.change_percent), 10, self._quote_color(quote), bg="#010203", width=9, anchor="e")
+            for label in (name_label, price_label, percent_label):
+                label.bind("<Double-Button-1>", lambda _event: self.hide_to_tray())
+            name_label.pack(side=tk.LEFT)
+            price_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            percent_label.pack(side=tk.RIGHT)
 
     def _render_widget_mode(self) -> None:
         root = ttk.Frame(self, style="Panel.TFrame", padding=12)
@@ -234,8 +307,6 @@ class AStockPanel(tk.Tk):
         header = ttk.Frame(root, style="Panel.TFrame")
         header.pack(fill=tk.X)
         ttk.Label(header, text="桌面行情", font=("Microsoft YaHei UI", 12, "bold")).pack(side=tk.LEFT)
-        ttk.Button(header, text="设置", command=self.open_settings).pack(side=tk.RIGHT)
-        ttk.Button(header, text="隐藏", command=self.hide_to_tray).pack(side=tk.RIGHT, padx=(0, 6))
 
         body = tk.Frame(root, bg="#eef1ee")
         body.pack(fill=tk.BOTH, expand=True, pady=(10, 8))
@@ -336,10 +407,20 @@ class AStockPanel(tk.Tk):
                 if kind == "quotes":
                     self.last_quotes = payload  # type: ignore[assignment]
                     self.status_var.set(f"已更新 {len(self.last_quotes)} 项")
-                    self._render_current_mode()
+                    if self.config_data.mode == "table" and hasattr(self, "tree"):
+                        self._fill_table(self.last_quotes)
+                    else:
+                        self._render_current_mode()
                     self._refresh_tray()
+                elif kind == "chart":
+                    self.last_chart = payload  # type: ignore[assignment]
+                    self.is_chart_loading = False
+                    self.draw_chart()
+                    if self.last_chart:
+                        self.chart_status_var.set(f"{self.last_chart.name} {period_label(self.last_chart.period)} 已更新")
                 else:
                     self.status_var.set(str(payload))
+                    self.is_chart_loading = False
                 self.is_loading = False
                 self._schedule_refresh()
         except queue.Empty:
@@ -389,14 +470,22 @@ class AStockPanel(tk.Tk):
                 dialog.iconphoto(False, self._icon_photo)
             except tk.TclError:
                 pass
-        dialog.geometry("390x260")
-        dialog.resizable(False, False)
+        dialog.geometry("460x390")
+        dialog.minsize(420, 320)
+        dialog.resizable(True, True)
         dialog.configure(bg="#eef1ee")
         dialog.transient(self)
         dialog.grab_set()
 
-        frame = ttk.Frame(dialog, style="Panel.TFrame", padding=16)
-        frame.pack(fill=tk.BOTH, expand=True)
+        canvas = tk.Canvas(dialog, bg="#eef1ee", highlightthickness=0)
+        scrollbar = ttk.Scrollbar(dialog, orient=tk.VERTICAL, command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        frame = ttk.Frame(canvas, style="Panel.TFrame", padding=16)
+        window_id = canvas.create_window((0, 0), window=frame, anchor="nw")
+        frame.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda event: canvas.itemconfigure(window_id, width=event.width))
         ttk.Label(frame, text="显示模式").grid(row=0, column=0, sticky="w", pady=7)
         mode_box = ttk.Combobox(frame, textvariable=self.mode_label_var, values=list(MODE_LABELS.values()), state="readonly", width=14)
         mode_box.grid(row=0, column=1, sticky="ew", pady=7)
@@ -415,6 +504,118 @@ class AStockPanel(tk.Tk):
         buttons.grid(row=7, column=0, columnspan=2, sticky="e", pady=(18, 0))
         ttk.Button(buttons, text="取消", command=dialog.destroy).pack(side=tk.RIGHT, padx=(8, 0))
         ttk.Button(buttons, text="保存", command=lambda: self._save_settings_dialog(dialog)).pack(side=tk.RIGHT)
+
+    def select_chart_symbol(self) -> None:
+        selection = self.chart_list.curselection()
+        if not selection:
+            return
+        index = selection[0]
+        if index >= len(self.config_data.symbols):
+            return
+        self.chart_symbol_var.set(normalize_symbol(self.config_data.symbols[index]))
+        self.refresh_chart()
+
+    def refresh_chart(self) -> None:
+        if self.is_chart_loading:
+            return
+        symbol = self.chart_symbol_var.get().strip()
+        if not symbol:
+            return
+        self.is_chart_loading = True
+        if hasattr(self, "chart_status_var"):
+            self.chart_status_var.set("图表加载中...")
+        period = chart_period_value(self.chart_period_var.get())
+        threading.Thread(target=self._fetch_chart_worker, args=(symbol, period), daemon=True).start()
+
+    def _fetch_chart_worker(self, symbol: str, period: str) -> None:
+        try:
+            data = fetch_chart_data(symbol, period)
+        except Exception as exc:
+            self.result_queue.put(("error", f"图表加载失败: {exc}"))
+        else:
+            self.result_queue.put(("chart", data))
+
+    def draw_chart(self) -> None:
+        canvas = getattr(self, "chart_canvas", None)
+        if canvas is None:
+            return
+        canvas.delete("all")
+        data = self.last_chart
+        width = max(canvas.winfo_width(), 480)
+        height = max(canvas.winfo_height(), 260)
+        pad_left, pad_right, pad_top, pad_bottom = 54, 22, 28, 46
+        volume_height = 58
+        chart_bottom = height - pad_bottom - volume_height
+        volume_top = chart_bottom + 18
+        canvas.create_rectangle(0, 0, width, height, fill="#fbfcfa", outline="")
+        if not data or not data.points:
+            canvas.create_text(width / 2, height / 2, text="暂无图表数据", fill="#6b746c", font=("Microsoft YaHei UI", 12))
+            return
+
+        title = f"{data.name} {data.code}  {period_label(data.period)}"
+        canvas.create_text(pad_left, 16, text=title, anchor="w", fill="#263029", font=("Microsoft YaHei UI", 10, "bold"))
+        if data.period == "trend":
+            self._draw_trend(canvas, data, width, chart_bottom, volume_top, pad_left, pad_right, pad_top, pad_bottom)
+        else:
+            self._draw_kline(canvas, data, width, chart_bottom, volume_top, pad_left, pad_right, pad_top, pad_bottom)
+
+    def _draw_trend(self, canvas: tk.Canvas, data: ChartData, width: int, chart_bottom: int, volume_top: int, pad_left: int, pad_right: int, pad_top: int, pad_bottom: int) -> None:
+        points = [point for point in data.points if isinstance(point, TrendPoint)]
+        prices = [point.price for point in points]
+        averages = [point.average for point in points if point.average is not None]
+        values = prices + averages + ([data.previous_close] if data.previous_close else [])
+        min_price, max_price = _range(values)
+        max_volume = max((point.volume for point in points), default=1)
+        plot_width = width - pad_left - pad_right
+        plot_height = chart_bottom - pad_top
+        self._draw_grid(canvas, width, chart_bottom, volume_top, pad_left, pad_right, pad_top, pad_bottom, min_price, max_price)
+
+        if data.previous_close:
+            y = _scale(data.previous_close, min_price, max_price, chart_bottom, pad_top)
+            canvas.create_line(pad_left, y, width - pad_right, y, fill="#d5b46c", dash=(4, 3))
+        price_points = []
+        avg_points = []
+        for idx, point in enumerate(points):
+            x = pad_left + plot_width * idx / max(1, len(points) - 1)
+            price_points.extend((x, _scale(point.price, min_price, max_price, chart_bottom, pad_top)))
+            if point.average is not None:
+                avg_points.extend((x, _scale(point.average, min_price, max_price, chart_bottom, pad_top)))
+            bar_h = (point.volume / max_volume) * (pad_bottom + 28)
+            canvas.create_line(x, height_for_volume(volume_top, pad_bottom, canvas) - bar_h, x, height_for_volume(volume_top, pad_bottom, canvas), fill="#cbd6cb")
+        if len(price_points) >= 4:
+            canvas.create_line(*price_points, fill="#3f6f8f", width=2)
+        if len(avg_points) >= 4:
+            canvas.create_line(*avg_points, fill="#b08945", width=1)
+
+    def _draw_kline(self, canvas: tk.Canvas, data: ChartData, width: int, chart_bottom: int, volume_top: int, pad_left: int, pad_right: int, pad_top: int, pad_bottom: int) -> None:
+        points = [point for point in data.points if isinstance(point, KLinePoint)]
+        prices = [value for point in points for value in (point.open, point.close, point.high, point.low)]
+        min_price, max_price = _range(prices)
+        max_volume = max((point.volume for point in points), default=1)
+        plot_width = width - pad_left - pad_right
+        candle_w = max(3, min(10, plot_width / max(1, len(points)) * 0.62))
+        self._draw_grid(canvas, width, chart_bottom, volume_top, pad_left, pad_right, pad_top, pad_bottom, min_price, max_price)
+
+        for idx, point in enumerate(points):
+            x = pad_left + plot_width * (idx + 0.5) / max(1, len(points))
+            y_open = _scale(point.open, min_price, max_price, chart_bottom, pad_top)
+            y_close = _scale(point.close, min_price, max_price, chart_bottom, pad_top)
+            y_high = _scale(point.high, min_price, max_price, chart_bottom, pad_top)
+            y_low = _scale(point.low, min_price, max_price, chart_bottom, pad_top)
+            color = "#b63b38" if point.close >= point.open else "#247a53"
+            canvas.create_line(x, y_high, x, y_low, fill=color)
+            canvas.create_rectangle(x - candle_w / 2, min(y_open, y_close), x + candle_w / 2, max(y_open, y_close) + 1, outline=color, fill="#fbfcfa" if point.close >= point.open else color)
+            bar_h = (point.volume / max_volume) * (pad_bottom + 28)
+            base = height_for_volume(volume_top, pad_bottom, canvas)
+            canvas.create_rectangle(x - candle_w / 2, base - bar_h, x + candle_w / 2, base, outline="", fill="#d6ddd5")
+
+    def _draw_grid(self, canvas: tk.Canvas, width: int, chart_bottom: int, volume_top: int, pad_left: int, pad_right: int, pad_top: int, pad_bottom: int, min_price: float, max_price: float) -> None:
+        for i in range(5):
+            y = pad_top + (chart_bottom - pad_top) * i / 4
+            value = max_price - (max_price - min_price) * i / 4
+            canvas.create_line(pad_left, y, width - pad_right, y, fill="#e5ebe4")
+            canvas.create_text(pad_left - 8, y, text=f"{value:.2f}", anchor="e", fill="#778278", font=("Microsoft YaHei UI", 8))
+        canvas.create_line(pad_left, volume_top, width - pad_right, volume_top, fill="#e5ebe4")
 
     def _save_settings_dialog(self, dialog: tk.Toplevel) -> None:
         self.config_data.color_mode = self.color_mode_var.get()
@@ -607,6 +808,45 @@ def format_money(value: float | None) -> str:
     if value >= 10_000:
         return f"{value / 10_000:.2f}万"
     return f"{value:.0f}"
+
+
+def chart_period_value(label: str) -> str:
+    return {
+        "分时": "trend",
+        "日K": "day",
+        "周K": "week",
+        "月K": "month",
+    }.get(label, "trend")
+
+
+def period_label(period: str) -> str:
+    return {
+        "trend": "分时",
+        "day": "日K",
+        "week": "周K",
+        "month": "月K",
+    }.get(period, period)
+
+
+def _range(values: list[float | None]) -> tuple[float, float]:
+    clean_values = [value for value in values if value is not None]
+    if not clean_values:
+        return 0.0, 1.0
+    low = min(clean_values)
+    high = max(clean_values)
+    if low == high:
+        padding = max(abs(low) * 0.01, 1)
+        return low - padding, high + padding
+    padding = (high - low) * 0.08
+    return low - padding, high + padding
+
+
+def _scale(value: float, low: float, high: float, bottom: int, top: int) -> float:
+    return bottom - (value - low) / max(high - low, 0.000001) * (bottom - top)
+
+
+def height_for_volume(volume_top: int, pad_bottom: int, canvas: tk.Canvas) -> int:
+    return max(volume_top + 20, canvas.winfo_height() - pad_bottom + 28)
 
 
 def main() -> None:
