@@ -2,7 +2,7 @@
   "refresh_seconds": 30,
   "topmost": false,
   "compact": false,
-  "mode": "summary",
+  "mode": "table",
   "color_mode": "neutral",
   "opacity": 1.0,
   "minimize_to_taskbar": false,

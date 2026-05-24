@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import logging
 import sys
+import traceback
 from typing import Callable
 
 from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal
@@ -26,13 +28,34 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QStyle,
+    QStackedWidget,
     QSystemTrayIcon,
     QVBoxLayout,
     QWidget,
 )
 
-from .config import ICON_PATH, AppConfig, load_config, save_config
+from .config import ICON_PATH, PROJECT_ROOT, AppConfig, load_config, save_config
 from .market_data import ChartData, KLinePoint, QuoteError, StockQuote, TrendPoint, fetch_chart_data, fetch_quotes, normalize_symbol
+
+
+LOG_PATH = PROJECT_ROOT / "logs" / "app.log"
+
+
+def setup_logging() -> None:
+    """初始化桌面端文件日志，便于定位 exe 闪退和接口异常。"""
+    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(
+        filename=str(LOG_PATH),
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        encoding="utf-8",
+    )
+
+
+def log_uncaught_exception(exc_type, exc_value, exc_traceback) -> None:
+    """兜底记录主线程未捕获异常，避免无控制台启动时错误直接消失。"""
+    logging.critical("未捕获异常", exc_info=(exc_type, exc_value, exc_traceback))
+    sys.__excepthook__(exc_type, exc_value, exc_traceback)
 
 
 class WorkerSignals(QObject):
@@ -51,7 +74,8 @@ class Worker(QRunnable):
         try:
             self.signals.result.emit(self.fn(*self.args))
         except Exception as exc:
-            self.signals.error.emit(str(exc))
+            logging.exception("后台任务执行失败")
+            self.signals.error.emit("".join(traceback.format_exception_only(type(exc), exc)).strip())
 
 
 class ChartWidget(QWidget):
@@ -215,6 +239,9 @@ class MainWindow(QMainWindow):
         self.selected_secid = self.config_data.symbols[0] if self.config_data.symbols else "1.000001"
         self.period = "trend"
         self.mode = self.config_data.mode
+        self.full_page = "watchlist"
+        self.chart_cache: dict[tuple[str, str], ChartData] = {}
+        self.chart_request_key: tuple[str, str] | None = None
         self._drag_offset = None
 
         self.setWindowTitle("A Stock Panel")
@@ -256,71 +283,116 @@ class MainWindow(QMainWindow):
         self.setWindowOpacity(1.0)
         root = QWidget()
         root.setObjectName("root")
-        layout = QHBoxLayout(root)
+        layout = QVBoxLayout(root)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        sidebar = QFrame()
-        sidebar.setObjectName("sidebar")
-        sidebar.setFixedWidth(300)
-        side_layout = QVBoxLayout(sidebar)
-        side_layout.setContentsMargins(14, 14, 12, 14)
-        side_layout.setSpacing(10)
+        toolbar = QFrame()
+        toolbar.setObjectName("toolbar")
+        toolbar_layout = QHBoxLayout(toolbar)
+        toolbar_layout.setContentsMargins(18, 12, 18, 12)
+        toolbar_layout.setSpacing(10)
+        title = QLabel("A Stock Panel")
+        title.setObjectName("appTitle")
+        self.watchlist_page_button = QPushButton("自选列表")
+        self.watchlist_page_button.setObjectName("navButton")
+        self.watchlist_page_button.clicked.connect(lambda: self.set_full_page("watchlist"))
+        self.chart_page_button = QPushButton("K线图")
+        self.chart_page_button.setObjectName("navButton")
+        self.chart_page_button.clicked.connect(lambda: self.set_full_page("chart"))
+        toolbar_layout.addWidget(title)
+        toolbar_layout.addSpacing(12)
+        toolbar_layout.addWidget(self.watchlist_page_button)
+        toolbar_layout.addWidget(self.chart_page_button)
+        toolbar_layout.addStretch()
+
+        refresh = QPushButton("刷新")
+        refresh.setObjectName("ghostButton")
+        refresh.clicked.connect(self.refresh_quotes)
+        settings = QPushButton("设置")
+        settings.setObjectName("ghostButton")
+        settings.clicked.connect(self.open_settings)
+        mode = QComboBox()
+        mode.addItems(["完整版", "极简置顶", "桌面组件", "市场摘要"])
+        mode.setCurrentText({"table": "完整版", "mini": "极简置顶", "widget": "桌面组件", "summary": "市场摘要"}.get(self.mode, "完整版"))
+        mode.currentTextChanged.connect(self.switch_mode_label)
+        toolbar_layout.addWidget(refresh)
+        toolbar_layout.addWidget(settings)
+        toolbar_layout.addWidget(mode)
+        layout.addWidget(toolbar)
+
+        self.page_stack = QStackedWidget()
+        self.watchlist_page = QWidget()
+        watch_layout = QVBoxLayout(self.watchlist_page)
+        watch_layout.setContentsMargins(24, 18, 24, 18)
+        watch_layout.setSpacing(14)
         search_row = QHBoxLayout()
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("输入股票名称、代码")
+        self.search_input.setPlaceholderText("输入股票名称或代码，例如 600519")
         self.search_input.returnPressed.connect(self.add_symbol)
         add_btn = QPushButton("+")
         add_btn.setObjectName("roundButton")
         add_btn.clicked.connect(self.add_symbol)
         search_row.addWidget(self.search_input)
         search_row.addWidget(add_btn)
-        side_layout.addLayout(search_row)
-        header = QHBoxLayout()
-        title = QLabel("关注列表")
-        title.setObjectName("sectionTitle")
-        refresh = QPushButton("刷新")
-        refresh.setObjectName("ghostButton")
-        refresh.clicked.connect(self.refresh_quotes)
-        header.addWidget(title)
-        header.addStretch()
-        header.addWidget(refresh)
-        side_layout.addLayout(header)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
+        watch_layout.addLayout(search_row)
+        self.cards_scroll = QScrollArea()
+        self.cards_scroll.setWidgetResizable(True)
+        self.cards_scroll.setFrameShape(QFrame.NoFrame)
         cards = QWidget()
         self.cards_layout = QVBoxLayout(cards)
         self.cards_layout.setContentsMargins(0, 0, 0, 0)
-        self.cards_layout.setSpacing(8)
-        scroll.setWidget(cards)
-        side_layout.addWidget(scroll)
+        self.cards_layout.setSpacing(10)
+        self.cards_scroll.setWidget(cards)
+        watch_layout.addWidget(self.cards_scroll, 1)
 
-        main = QFrame()
-        main.setObjectName("main")
-        main_layout = QVBoxLayout(main)
-        main_layout.setContentsMargins(26, 16, 26, 18)
-        main_layout.setSpacing(12)
-        self.index_row = QHBoxLayout()
-        main_layout.addLayout(self.index_row)
-        divider = QFrame()
-        divider.setObjectName("divider")
-        divider.setFixedHeight(1)
-        main_layout.addWidget(divider)
+        self.chart_page = QWidget()
+        chart_layout = QHBoxLayout(self.chart_page)
+        chart_layout.setContentsMargins(24, 18, 24, 18)
+        chart_layout.setSpacing(18)
+        chart_sidebar = QFrame()
+        chart_sidebar.setObjectName("sidebar")
+        chart_sidebar.setFixedWidth(280)
+        chart_side_layout = QVBoxLayout(chart_sidebar)
+        chart_side_layout.setContentsMargins(12, 12, 12, 12)
+        chart_side_layout.setSpacing(10)
+        chart_title = QLabel("选择图表")
+        chart_title.setObjectName("sectionTitle")
+        chart_side_layout.addWidget(chart_title)
+        chart_scroll = QScrollArea()
+        chart_scroll.setWidgetResizable(True)
+        chart_scroll.setFrameShape(QFrame.NoFrame)
+        chart_cards = QWidget()
+        self.chart_cards_layout = QVBoxLayout(chart_cards)
+        self.chart_cards_layout.setContentsMargins(0, 0, 0, 0)
+        self.chart_cards_layout.setSpacing(8)
+        chart_scroll.setWidget(chart_cards)
+        chart_side_layout.addWidget(chart_scroll, 1)
+
+        chart_main = QFrame()
+        chart_main.setObjectName("main")
+        chart_main_layout = QVBoxLayout(chart_main)
+        chart_main_layout.setContentsMargins(0, 0, 0, 0)
+        chart_main_layout.setSpacing(12)
         self.detail = QVBoxLayout()
-        main_layout.addLayout(self.detail)
+        chart_main_layout.addLayout(self.detail)
         self.period_row = QHBoxLayout()
-        main_layout.addLayout(self.period_row)
+        chart_main_layout.addLayout(self.period_row)
         self.chart = ChartWidget()
         self.chart.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        main_layout.addWidget(self.chart, 1)
+        chart_main_layout.addWidget(self.chart, 1)
         self.status_label = QLabel("")
         self.status_label.setObjectName("muted")
-        main_layout.addWidget(self.status_label)
-        layout.addWidget(sidebar)
-        layout.addWidget(main, 1)
+        chart_main_layout.addWidget(self.status_label)
+        chart_layout.addWidget(chart_sidebar)
+        chart_layout.addWidget(chart_main, 1)
+
+        self.page_stack.addWidget(self.watchlist_page)
+        self.page_stack.addWidget(self.chart_page)
+        layout.addWidget(self.page_stack, 1)
         self.setCentralWidget(root)
         self._render_full_content()
+        self.set_full_page(self.full_page)
 
     def _build_mini(self) -> None:
         self._clear()
@@ -429,36 +501,18 @@ class MainWindow(QMainWindow):
     def _render_full_content(self) -> None:
         if not hasattr(self, "cards_layout"):
             return
+        # 完整模式分成自选页和图表页，刷新行情时只重绘轻量列表，避免频繁重建图表区域。
         clear_layout(self.cards_layout)
+        if hasattr(self, "chart_cards_layout"):
+            clear_layout(self.chart_cards_layout)
         pinned = set(normalize_symbol(s) for s in self.config_data.pinned_symbols)
         for quote in self.quotes:
             self.cards_layout.addWidget(StockCard(quote, quote.secid == self.selected_secid, quote.secid in pinned, self.select_symbol, self.toggle_pin))
+            if hasattr(self, "chart_cards_layout"):
+                self.chart_cards_layout.addWidget(StockCard(quote, quote.secid == self.selected_secid, quote.secid in pinned, self.select_chart_symbol, self.toggle_pin))
         self.cards_layout.addStretch()
-
-        clear_layout(self.index_row)
-        for quote in self.quotes[:5]:
-            item = QVBoxLayout()
-            name = QLabel(short_name(quote.name))
-            name.setObjectName("indexName")
-            price = QLabel(format_price(quote.price))
-            price.setObjectName("indexPrice")
-            change = QLabel(f"{format_signed(quote.change_amount)}({format_percent(quote.change_percent)})")
-            change.setObjectName("redText" if (quote.change_percent or 0) >= 0 else "greenText")
-            item.addWidget(name)
-            item.addWidget(price)
-            item.addWidget(change)
-            self.index_row.addLayout(item)
-        self.index_row.addStretch()
-        for text, callback in (("置顶", self.toggle_selected_pin), ("移除", self.remove_selected), ("设置", self.open_settings)):
-            button = QPushButton(text)
-            button.setObjectName("ghostButton")
-            button.clicked.connect(callback)
-            self.index_row.addWidget(button)
-        mode = QComboBox()
-        mode.addItems(["完整版", "极简置顶", "桌面组件", "市场摘要"])
-        mode.setCurrentText({"table": "完整版", "mini": "极简置顶", "widget": "桌面组件", "summary": "市场摘要"}.get(self.mode, "完整版"))
-        mode.currentTextChanged.connect(self.switch_mode_label)
-        self.index_row.addWidget(mode)
+        if hasattr(self, "chart_cards_layout"):
+            self.chart_cards_layout.addStretch()
 
         clear_layout(self.detail)
         quote = self.selected_quote()
@@ -482,6 +536,11 @@ class MainWindow(QMainWindow):
             top.addLayout(left)
             top.addStretch()
             top.addLayout(right)
+            for text, callback in (("置顶", self.toggle_selected_pin), ("移除", self.remove_selected)):
+                button = QPushButton(text)
+                button.setObjectName("ghostButton")
+                button.clicked.connect(callback)
+                top.addWidget(button)
             self.detail.addLayout(top)
             grid = QGridLayout()
             stats = [
@@ -509,6 +568,22 @@ class MainWindow(QMainWindow):
             self.period_row.addWidget(button)
         self.period_row.addStretch()
 
+    def set_full_page(self, page: str) -> None:
+        """切换完整版的业务页面，进入图表页时才加载 K 线/分时数据。"""
+        self.full_page = "chart" if page == "chart" else "watchlist"
+        if hasattr(self, "page_stack"):
+            self.page_stack.setCurrentWidget(self.chart_page if self.full_page == "chart" else self.watchlist_page)
+        if hasattr(self, "watchlist_page_button"):
+            self.watchlist_page_button.setProperty("active", self.full_page == "watchlist")
+            self.chart_page_button.setProperty("active", self.full_page == "chart")
+            self.watchlist_page_button.style().unpolish(self.watchlist_page_button)
+            self.watchlist_page_button.style().polish(self.watchlist_page_button)
+            self.chart_page_button.style().unpolish(self.chart_page_button)
+            self.chart_page_button.style().polish(self.chart_page_button)
+        if self.full_page == "chart":
+            self._render_full_content()
+            self.refresh_chart()
+
     def refresh_quotes(self) -> None:
         worker = Worker(fetch_quotes, list(self.config_data.symbols))
         worker.signals.result.connect(self.on_quotes)
@@ -516,7 +591,16 @@ class MainWindow(QMainWindow):
         self.thread_pool.start(worker)
 
     def refresh_chart(self) -> None:
+        if self.full_page != "chart":
+            return
+        request_key = (self.selected_secid, self.period)
+        if request_key in self.chart_cache:
+            self.on_chart(self.chart_cache[request_key])
+            return
+        self.chart_request_key = request_key
         self.set_status("图表加载中...")
+        if hasattr(self, "chart"):
+            self.chart.set_data(None)
         worker = Worker(fetch_chart_data, self.selected_secid, self.period)
         worker.signals.result.connect(self.on_chart)
         worker.signals.error.connect(lambda message: self.set_status(f"图表失败：{message}"))
@@ -535,16 +619,30 @@ class MainWindow(QMainWindow):
         else:
             self._render_full_content()
         self.update_tray()
-        self.refresh_chart()
+        if self.full_page == "chart":
+            self.refresh_chart()
 
     def on_chart(self, result: object) -> None:
-        self.chart_data = result  # type: ignore[assignment]
+        chart_data = result  # type: ignore[assignment]
+        if not isinstance(chart_data, ChartData):
+            return
+        # 用户快速切换时，较慢的旧请求可能后返回，这里只接受当前股票和周期的数据。
+        if (chart_data.secid, chart_data.period) != (self.selected_secid, self.period):
+            logging.info("忽略过期图表数据: %s %s", chart_data.secid, chart_data.period)
+            return
+        self.chart_data = chart_data
+        self.chart_cache[(chart_data.secid, chart_data.period)] = chart_data
         if hasattr(self, "chart"):
             self.chart.set_data(self.chart_data)
         if self.chart_data:
             self.set_status(f"{self.chart_data.name} {period_label(self.chart_data.period)} 已更新")
 
     def select_symbol(self, secid: str) -> None:
+        self.selected_secid = secid
+        self._render_full_content()
+
+    def select_chart_symbol(self, secid: str) -> None:
+        """图表页选择股票时才触发图表请求，避免自选列表点击造成卡顿。"""
         self.selected_secid = secid
         self._render_full_content()
         self.refresh_chart()
@@ -807,11 +905,14 @@ def format_money(value: float | None) -> str:
 
 STYLESHEET = """
 QWidget#root { background: #ffffff; }
+QFrame#toolbar { background: #ffffff; border-bottom: 1px solid #e7ebf0; }
 QFrame#sidebar { background: #f7f9fc; border-right: 1px solid #e7ebf0; }
 QFrame#main { background: #ffffff; }
 QLineEdit { border: 1px solid #dde3ea; border-radius: 12px; padding: 9px 12px; background: white; color: #252b31; }
 QPushButton { border: 0; border-radius: 10px; padding: 8px 12px; background: #eef2f7; color: #30363d; font-weight: 600; }
 QPushButton:hover { background: #e1e7ef; }
+QPushButton#navButton { background: #f4f6f8; color: #68717b; padding: 8px 14px; }
+QPushButton#navButton[active="true"] { background: #1f2937; color: #ffffff; }
 QPushButton#ghostButton { background: transparent; color: #69727d; }
 QPushButton#ghostButton:hover { background: #f1f4f7; }
 QPushButton#roundButton { min-width: 34px; max-width: 34px; border-radius: 17px; background: #ffffff; color: #7b8289; }
@@ -821,6 +922,7 @@ QPushButton#tabButton:checked { color: #2f8cff; border-bottom: 2px solid #2f8cff
 QFrame#stockCard, QFrame#stockCardSelected { border: 1px solid #edf0f2; border-radius: 12px; background: #ffffff; }
 QFrame#stockCardSelected { background: #edf4ff; border: 1px solid #c9ddff; }
 QLabel#sectionTitle { color: #8b929a; font-weight: 700; }
+QLabel#appTitle { color: #22272d; font-size: 18px; font-weight: 900; }
 QLabel#cardName { color: #22272d; font-size: 14px; font-weight: 700; }
 QLabel#muted, QLabel#indexName, QLabel#heroCode { color: #8b929a; }
 QLabel#indexPrice { color: #252b31; font-size: 24px; font-weight: 800; }
@@ -853,6 +955,9 @@ QCheckBox { color: #4f5862; font-weight: 600; }
 
 
 def main() -> None:
+    setup_logging()
+    sys.excepthook = log_uncaught_exception
+    logging.info("A Stock Panel 启动")
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
     if ICON_PATH.exists():

@@ -26,6 +26,20 @@
 .\start.bat
 ```
 
+## PyCharm 调试
+
+用 PyCharm 打开 `D:\IdeaProjects\my_ai\a_stock_panel`，运行根目录的 `launch_gui.py`。解释器选择：
+
+```text
+D:\IdeaProjects\my_ai\a_stock_panel\.venv\Scripts\python.exe
+```
+
+Working directory 设置为项目根目录 `D:\IdeaProjects\my_ai\a_stock_panel`。程序日志会写入：
+
+```text
+logs\app.log
+```
+
 ## 显示模式
 
 完整版页面可以直接切换模式、打开设置、添加股票、移除股票、置顶/取消置顶。极简置顶模式不显示设置按钮和模式切换，只显示置顶行情；需要切换时用托盘菜单或右键菜单。
